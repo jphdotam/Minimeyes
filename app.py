@@ -13,6 +13,7 @@ from minimiser import Minimiser
 from datetime import datetime
 import time
 
+
 # Set page config first - this must be the first Streamlit command
 st.set_page_config(page_title="Minimisation WebApp", layout="wide")
 
@@ -641,37 +642,72 @@ try:
         
         # Display each table with an expander
         for var_name, table in tables.items():
-            with st.expander(f"Balance for: {var_name}", expanded=True):
-                st.dataframe(table)
+            with st.expander(f"#### Balance for: {var_name}", expanded=True):                
                 
-                # Calculate imbalance metrics
-                st.write("#### Imbalance Analysis")
-                
-                # Skip if only one arm or no patients
+                # If only 1 arm, or if the table doesn't have enough rows, skip
                 if len(minimiser.arms) <= 1 or table.shape[0] <= 2:
-                    st.info("Not enough data to calculate imbalance metrics.")
+                    st.info("Not enough data to calculate extra skew/imbalance.")
                     continue
+                
+                # We'll add two new items:
+                # 1) A "Skew" column that shows (max - min) across that row
+                # 2) An "Imbalance" row that shows (max - min) across that column
+                
+                # Identify which rows/columns are actual arms/categories (skipping 'Total')
+                # If your crosstab includes a final row named 'Total' and final column named 'Total',
+                # we skip them in the calculations.
+                arm_rows = [r for r in table.index if r != 'Total']
+                category_cols = [c for c in table.columns if c not in ('Total', 'Skew')]
+                
+                # 1) Create a blank "Skew" column first so we can fill it
+                if 'Skew' not in table.columns:
+                    table['Skew'] = ''
+                
+                # For each arm row, compute the row's skew: (max - min) among its categories
+                for arm in arm_rows:
+                    # Only consider the real category columns (skip 'Total', skip the new 'Skew' column)
+                    row_vals = table.loc[arm, category_cols]
+                    if row_vals.empty:
+                        table.loc[arm, 'Skew'] = ''
+                        continue
                     
-                # Remove the 'Total' row and column for calculations
-                calc_table = table.iloc[:-1, :-1] 
+                    difference = row_vals.max() - row_vals.min()
+                    row_sum = row_vals.sum()
+                    pct = round(difference / row_sum * 100) if row_sum > 0 else 0
+                    table.loc[arm, 'Skew'] = f"{difference} ({pct}%)"
                 
-                # Calculate maximum imbalance for this characteristic
-                max_imbalance = calc_table.max().max() - calc_table.min().min()
-                st.write(f"Maximum difference between any arms: {max_imbalance}")
+                # Make sure the "Total" row has a blank skew
+                if 'Total' in table.index:
+                    table.loc['Total', 'Skew'] = ''
                 
-                # Calculate overall imbalance as sum of squares of differences from ideal
-                total_patients = calc_table.values.sum()
-                ideal_per_arm = total_patients / len(minimiser.arms)
-                imbalance_score = 0
+                # 2) Create an "Imbalance" row for the columns
+                # Initialize it with empty strings
+                if 'Imbalance' not in table.index:
+                    table.loc['Imbalance'] = ''
                 
-                for arm in calc_table.index:
-                    for val in calc_table.columns:
-                        expected = ideal_per_arm / len(calc_table.columns)
-                        actual = calc_table.loc[arm, val]
-                        imbalance_score += (actual - expected) ** 2
-                        
-                imbalance_score = round(imbalance_score ** 0.5, 2)  # Root mean square
-                st.write(f"Overall imbalance score: {imbalance_score}")
+                for col in category_cols:
+                    col_vals = table.loc[arm_rows, col]
+                    if col_vals.empty:
+                        table.loc['Imbalance', col] = ''
+                        continue
+                    
+                    difference = col_vals.max() - col_vals.min()
+                    col_sum = col_vals.sum()
+                    pct = round(difference / col_sum * 100) if col_sum > 0 else 0
+                    table.loc['Imbalance', col] = f"{difference} ({pct}%)"
+                
+                # Make sure we leave the intersection of 'Imbalance' row + 'Skew' column blank
+                table.loc['Imbalance', 'Skew'] = ''
+                # Also blank out the 'Total' cell on the 'Imbalance' row if it exists
+                if 'Total' in table.columns:
+                    table.loc['Imbalance', 'Total'] = ''
+                
+                # Finally, show the newly enhanced table
+                table_for_display = table.astype(str)
+                st.dataframe(table_for_display)
+
+
+
 
     # Main app flow
     def main():
