@@ -5,10 +5,15 @@ from collections import Counter
 import json
 import os
 from datetime import datetime
+from typing import Tuple
 
 class Minimiser:
-    def __init__(self, trial_id, minimisation_vars: dict, arms=('A', 'B'), minimisation_weight=0.8,
-                 seed=None, strict_mode=True):
+    def __init__(self, trial_id,
+                 minimisation_vars: dict,
+                 arms: Tuple[str, ...],
+                 minimisation_weight: float,
+                 seed: str,
+                 strict_mode=True):
         """Creates a minimisation instance which can be fed patients to randomise.
 
         Arguments:
@@ -25,7 +30,7 @@ class Minimiser:
         self.minimisation_vars = minimisation_vars
         self.arms = arms
         self.minimisation_weight = minimisation_weight
-        self.seed = seed if seed is not None else "default_seed"
+        self.seed = seed
         self.strict_mode = strict_mode
         self.df_patients = self.create_patient_dataframe()
         
@@ -40,10 +45,25 @@ class Minimiser:
             return 0
         return self.df_patients[self.df_patients['active'] == True].shape[0]
     
-    def characteristics_by_arm(self) -> pd.DataFrame:
-        """Returns a dataframe showing counts of each characteristic by arm, only for active patients."""
-        active_patients = self.df_patients[self.df_patients['active'] == True]
-        return active_patients.groupby(['arm']).aggregate(Counter)
+    def characteristics_by_arm(self):
+        """Return a table of characteristics by arm for monitoring balance."""
+        if self.df_patients.empty:
+            return pd.DataFrame()
+        
+        # Create a cross-tabulation for each characteristic
+        tables = {}
+        for var_name in self.minimisation_vars.keys():
+            if var_name in self.df_patients.columns:
+                # Create a crosstab for this variable
+                table = pd.crosstab(
+                    self.df_patients['arm'], 
+                    self.df_patients[var_name], 
+                    margins=True, 
+                    margins_name='Total'
+                )
+                tables[var_name] = table
+            
+        return tables
 
     def create_patient_dataframe(self) -> pd.DataFrame:
         """Returns a dataframe with a column for each minimisation variable, arm and active status"""
@@ -90,14 +110,14 @@ class Minimiser:
             # Determine arm algorithmically
             # See if first patient in trial
             if self.get_n_patients() == 0:
-                # Use deterministic randomization instead of Python's random
+                # Use deterministic randomisation 
                 rand = self.deterministic_random(id)
                 arm_index = int(rand * len(self.arms))
                 arm = self.arms[arm_index]
             # If not first patient
             else:
-                rand = self.deterministic_random(f"{id}_allocation")
-                if rand <= self.minimisation_weight:
+                # Get a new random number to see if we should use minimisation or not
+                if self.deterministic_random(f"{id}_minim_or_not") <= self.minimisation_weight:
                     arm = self.get_minimised_arm(characteristics)
                 else:
                     rand = self.deterministic_random(id)
@@ -178,18 +198,41 @@ class Minimiser:
     @classmethod
     def from_dict(cls, data):
         """Create a minimiser from a dictionary."""
+        # Convert lists back to tuples if necessary
+        minimisation_vars = {}
+        for key, values in data['minimisation_vars'].items():
+            if isinstance(values, list):
+                minimisation_vars[key] = tuple(values)
+            else:
+                minimisation_vars[key] = values
+            
+        arms = data['arms']
+        if isinstance(arms, list):
+            arms = tuple(arms)
+        
+        # Create minimiser instance
         minimiser = cls(
             trial_id=data['trial_id'],
-            minimisation_vars=data['minimisation_vars'],
-            arms=data['arms'],
+            minimisation_vars=minimisation_vars,
+            arms=arms,
             minimisation_weight=data['minimisation_weight'],
             seed=data['seed'],
             strict_mode=data['strict_mode']
         )
         
+        # Load patients if available
         if 'patients' in data and data['patients']:
             patients_df = pd.DataFrame(data['patients'])
-            patients_df.set_index('id', inplace=True)
-            minimiser.df_patients = patients_df
-            
-        return minimiser 
+            if 'id' in patients_df.columns:
+                patients_df.set_index('id', inplace=True)
+                minimiser.df_patients = patients_df
+        
+        return minimiser
+
+    def change_patient_status(self, patient_id, active):
+        """Change a patient's active status."""
+        if patient_id not in self.df_patients.index:
+            raise ValueError(f"Patient ID '{patient_id}' not found")
+        
+        self.df_patients.loc[patient_id, 'active'] = active
+        return active 

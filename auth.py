@@ -118,4 +118,17 @@ class AuthManager:
         if user["admin"]:
             return True
             
-        return trial_id in user["trial_access"] 
+        return trial_id in user["trial_access"]
+    
+    def has_users(self):
+        """Check if any users exist in the system."""
+        if not os.path.exists(self.auth_file):
+            return False
+        
+        try:
+            with open(self.auth_file, 'r') as f:
+                data = json.load(f)
+                # Check if there are any users in the users dictionary
+                return "users" in data and len(data["users"]) > 0
+        except (json.JSONDecodeError, FileNotFoundError):
+            return False 

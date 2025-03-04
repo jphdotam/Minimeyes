@@ -3,6 +3,7 @@ import json
 import pandas as pd
 from datetime import datetime
 from minimiser import Minimiser
+import shutil
 
 class DataManager:
     def __init__(self, base_dir="trials"):
@@ -16,13 +17,16 @@ class DataManager:
         # Check if trial already exists
         trial_dir = os.path.join(self.base_dir, trial_id)
         if os.path.exists(trial_dir):
-            raise ValueError(f"Trial with ID '{trial_id}' already exists.")
+            raise ValueError(f"Trial with ID '{trial_id}' already exists. Please choose a different trial ID.")
         
         # Create trial directory
-        os.makedirs(trial_dir, exist_ok=True)
-        os.makedirs(os.path.join(trial_dir, "audit"), exist_ok=True)
+        os.makedirs(trial_dir, exist_ok=False)  # Using exist_ok=False for clarity
         
-        # Create minimiser instance
+        # Create audit directory
+        audit_dir = os.path.join(trial_dir, "audit")
+        os.makedirs(audit_dir, exist_ok=True)
+        
+        # Create the minimiser instance
         minimiser = Minimiser(
             trial_id=trial_id,
             minimisation_vars=minimisation_vars,
@@ -32,26 +36,27 @@ class DataManager:
             strict_mode=strict_mode
         )
         
-        # Save trial configuration
-        config = {
-            'trial_id': trial_id,
-            'minimisation_vars': minimisation_vars,
-            'arms': arms,
-            'minimisation_weight': minimisation_weight,
-            'seed': seed,
-            'strict_mode': strict_mode,
-            'created_at': datetime.now().isoformat(),
-            'created_by': user
-        }
+        # Save configuration
+        config_file = os.path.join(trial_dir, "config.json")
+        with open(config_file, 'w') as f:
+            json.dump(minimiser.to_dict(), f, indent=2)
         
-        with open(os.path.join(trial_dir, "config.json"), 'w') as f:
-            json.dump(config, f, indent=2)
-            
-        # Create audit entry for trial creation
+        # Save initial state
+        state_file = os.path.join(trial_dir, "current_state.json")
+        with open(state_file, 'w') as f:
+            json.dump(minimiser.to_dict(), f, indent=2)
+        
+        # Add initial audit entry
         self._create_audit_entry(
             trial_id=trial_id,
             action="create_trial",
-            data=config,
+            data={
+                "minimisation_vars": minimisation_vars,
+                "arms": arms,
+                "minimisation_weight": minimisation_weight,
+                "seed": seed,
+                "strict_mode": strict_mode
+            },
             user=user
         )
         
@@ -131,78 +136,88 @@ class DataManager:
         return state
     
     def add_patient(self, trial_id, patient_id, characteristics, manual_arm=None, user=None):
-        """Add a new patient to a trial."""
+        """Add a patient to a trial."""
+        # Load the trial
         minimiser = self.load_trial(trial_id)
         
         # Randomise the patient
-        arm = minimiser.randomise_patient(patient_id, characteristics, manual_arm)
+        if manual_arm:
+            if minimiser.strict_mode:
+                raise ValueError("Cannot manually assign arm in strict mode")
+            arm = minimiser.add_patient(patient_id, characteristics, manual_arm)
+        else:
+            arm = minimiser.randomise_patient(patient_id, characteristics)
+        
+        # Save the updated state
+        trial_dir = os.path.join(self.base_dir, trial_id)
+        state_file = os.path.join(trial_dir, "current_state.json")
+        with open(state_file, 'w') as f:
+            json.dump(minimiser.to_dict(), f, indent=2)
         
         # Create audit entry
         self._create_audit_entry(
             trial_id=trial_id,
             action="add_patient",
             data={
-                'patient_id': patient_id,
-                'characteristics': characteristics,
-                'assigned_arm': arm,
-                'manual_arm': manual_arm
+                "patient_id": patient_id,
+                "characteristics": characteristics,
+                "arm": arm,
+                "manual": manual_arm is not None
             },
             user=user
         )
         
-        # Save updated state
-        self.save_trial_state(minimiser, user)
-        
         return arm
     
     def change_patient_status(self, trial_id, patient_id, active, user=None):
-        """Activate or deactivate a patient."""
+        """Change a patient's active status."""
+        # Load the trial
         minimiser = self.load_trial(trial_id)
         
-        if active:
-            minimiser.reactivate_patient(patient_id)
-            action = "reactivate_patient"
-        else:
-            minimiser.deactivate_patient(patient_id)
-            action = "deactivate_patient"
-            
+        # Change status
+        minimiser.change_patient_status(patient_id, active)
+        
+        # Save the updated state
+        trial_dir = os.path.join(self.base_dir, trial_id)
+        state_file = os.path.join(trial_dir, "current_state.json")
+        with open(state_file, 'w') as f:
+            json.dump(minimiser.to_dict(), f, indent=2)
+        
         # Create audit entry
         self._create_audit_entry(
             trial_id=trial_id,
-            action=action,
-            data={'patient_id': patient_id},
+            action="change_status",
+            data={
+                "patient_id": patient_id,
+                "active": active
+            },
             user=user
         )
-        
-        # Save updated state
-        self.save_trial_state(minimiser, user)
     
     def reassign_arm(self, trial_id, patient_id, new_arm, user=None):
         """Reassign a patient to a different arm."""
+        # Load the trial
         minimiser = self.load_trial(trial_id)
         
-        # Get current arm before reassignment
-        current_arm = None
-        if patient_id in minimiser.df_patients.index:
-            current_arm = minimiser.df_patients.at[patient_id, 'arm']
-            
         # Reassign arm
         minimiser.reassign_arm(patient_id, new_arm)
+        
+        # Save the updated state
+        trial_dir = os.path.join(self.base_dir, trial_id)
+        state_file = os.path.join(trial_dir, "current_state.json")
+        with open(state_file, 'w') as f:
+            json.dump(minimiser.to_dict(), f, indent=2)
         
         # Create audit entry
         self._create_audit_entry(
             trial_id=trial_id,
             action="reassign_arm",
             data={
-                'patient_id': patient_id,
-                'previous_arm': current_arm,
-                'new_arm': new_arm
+                "patient_id": patient_id,
+                "new_arm": new_arm
             },
             user=user
         )
-        
-        # Save updated state
-        self.save_trial_state(minimiser, user)
     
     def _create_audit_entry(self, trial_id, action, data, user=None):
         """Create an audit entry for an action."""
@@ -245,4 +260,33 @@ class DataManager:
                     entry = json.load(f)
                     audit_entries.append(entry)
                     
-        return audit_entries 
+        return audit_entries
+    
+    def archive_trial(self, trial_id, archived_trial_id=None):
+        """Archive a trial by moving it to the archived directory."""
+        # Generate an archived trial ID if none provided
+        if archived_trial_id is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archived_trial_id = f"{trial_id}_{timestamp}"
+        
+        # Create archives directory if it doesn't exist
+        archives_dir = os.path.join(os.path.dirname(self.base_dir), "trials_archived")
+        os.makedirs(archives_dir, exist_ok=True)
+        
+        # Source and destination paths
+        src_dir = os.path.join(self.base_dir, trial_id)
+        dst_dir = os.path.join(archives_dir, archived_trial_id)
+        
+        # Check if trial exists
+        if not os.path.exists(src_dir):
+            raise ValueError(f"Trial '{trial_id}' does not exist.")
+        
+        # Check if destination already exists
+        if os.path.exists(dst_dir):
+            raise ValueError(f"Archived trial '{archived_trial_id}' already exists.")
+        
+        # Move the directory (this preserves all files and subdirectories)
+        shutil.move(src_dir, dst_dir)
+        
+        # Return the archived trial ID
+        return archived_trial_id 
